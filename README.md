@@ -2,8 +2,9 @@
 
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
 measurement assurance work. It registers devices, opens verification cases,
-records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+records measurements, handles failed tolerance decisions, links measurements to
+external calibration evidence that was valid at the time of use, and seals
+traceable evidence records.
 
 ## Run
 
@@ -21,6 +22,7 @@ go run ./cmd/workflowcheck --workflow register-device
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
+go run ./cmd/workflowcheck --workflow external-calibration-basis
 go run ./cmd/workflowcheck --workflow seal-verification
 ```
 
@@ -36,6 +38,14 @@ or extend these smoke checks with red/green verification tests.
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `GET /external-calibration-providers`
+- `POST /external-calibration-providers`
+- `GET /external-calibration-providers/{id}`
+- `PUT /external-calibration-providers/{id}`
+- `GET /external-calibration-providers/{id}/events`
+- `POST /external-calibration-providers/{id}/capabilities`
+- `GET /external-calibration-providers/{id}/capabilities/{capabilityId}`
+- `PUT /external-calibration-providers/{id}/capabilities/{capabilityId}`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`

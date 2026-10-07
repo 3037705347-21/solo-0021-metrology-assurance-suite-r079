@@ -3,6 +3,7 @@ package assurance
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -77,6 +78,212 @@ func (s *Service) Device(ctx context.Context, id string) (domain.Device, error) 
 	return found, err
 }
 
+func (s *Service) RegisterExternalProvider(ctx context.Context, input contracts.RegisterExternalProviderRequest) (domain.ExternalCalibrationProvider, error) {
+	var created domain.ExternalCalibrationProvider
+	name := domain.NormalizeProviderName(input.Name)
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		if _, exists := m.ExternalProviderByName(name); exists {
+			return fmt.Errorf("%w: %s", domain.ErrDuplicateProvider, name)
+		}
+		item, err := domain.NewExternalCalibrationProvider(
+			m.NextID("external_provider"),
+			input.Name,
+			input.AccreditationNumber,
+			input.AccreditationBody,
+			input.Maintainer,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutExternalProvider(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"external_calibration_provider",
+			item.ID,
+			"",
+			"external_provider_registered",
+			item.Maintainer,
+			fmt.Sprintf("external calibration provider %s (%s) registered", item.Name, item.AccreditationNumber),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		created = item
+		return nil
+	})
+	return created, err
+}
+
+func (s *Service) ExternalProviders(ctx context.Context) ([]domain.ExternalCalibrationProvider, error) {
+	var result []domain.ExternalCalibrationProvider
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		result = snapshot.ExternalProviders()
+		sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) ExternalProvider(ctx context.Context, id string) (contracts.ExternalProviderDetailResponse, error) {
+	var result contracts.ExternalProviderDetailResponse
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		item, exists := snapshot.ExternalProvider(strings.TrimSpace(id))
+		if !exists {
+			return fmt.Errorf("%w: external calibration provider %s", domain.ErrNotFound, id)
+		}
+		result = providerDetail(snapshot, item)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) UpdateExternalProvider(ctx context.Context, id string, input contracts.UpdateExternalProviderRequest) (contracts.ExternalProviderDetailResponse, error) {
+	var result contracts.ExternalProviderDetailResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		trimmedID := strings.TrimSpace(id)
+		item, exists := m.ExternalProvider(trimmedID)
+		if !exists {
+			return fmt.Errorf("%w: external calibration provider %s", domain.ErrNotFound, id)
+		}
+		name := domain.NormalizeProviderName(input.Name)
+		if other, exists := m.ExternalProviderByName(name); exists && other.ID != item.ID {
+			return fmt.Errorf("%w: %s", domain.ErrDuplicateProvider, name)
+		}
+		if err := item.Update(input.Name, input.AccreditationNumber, input.AccreditationBody, input.Maintainer, s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateExternalProvider(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"external_calibration_provider",
+			item.ID,
+			"",
+			"external_provider_updated",
+			item.Maintainer,
+			fmt.Sprintf("external calibration provider %s record updated to version %d", item.Name, item.Version),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = providerDetail(m, item)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) RegisterExternalCapability(ctx context.Context, providerID string, input contracts.RegisterExternalCapabilityPayload) (domain.ExternalCalibrationCapability, error) {
+	var created domain.ExternalCalibrationCapability
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		provider, exists := m.ExternalProvider(strings.TrimSpace(providerID))
+		if !exists {
+			return fmt.Errorf("%w: external calibration provider %s", domain.ErrNotFound, providerID)
+		}
+		item, err := domain.NewExternalCalibrationCapability(
+			m.NextID("external_capability"),
+			provider.ID,
+			input.CertificateNumber,
+			input.Scope,
+			input.Unit,
+			input.MinValue,
+			input.MaxValue,
+			input.ValidFrom,
+			input.ValidUntil,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutExternalCapability(item); err != nil {
+			return err
+		}
+		maintainer := strings.TrimSpace(input.Maintainer)
+		if maintainer == "" {
+			maintainer = provider.Maintainer
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"external_calibration_provider",
+			provider.ID,
+			"",
+			"external_capability_registered",
+			maintainer,
+			fmt.Sprintf("external calibration capability %s for scope %s %s valid through %s", item.ID, item.Scope, item.Unit, item.ValidUntil.Format("2006-01-02")),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		created = item
+		return nil
+	})
+	return created, err
+}
+
+func (s *Service) ExternalCapability(ctx context.Context, providerID, capabilityID string) (domain.ExternalCalibrationCapability, error) {
+	var found domain.ExternalCalibrationCapability
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		item, exists := snapshot.ExternalCapability(strings.TrimSpace(providerID), strings.TrimSpace(capabilityID))
+		if !exists {
+			return fmt.Errorf("%w: external calibration capability %s for provider %s", domain.ErrNotFound, capabilityID, providerID)
+		}
+		found = item
+		return nil
+	})
+	return found, err
+}
+
+func (s *Service) UpdateExternalCapability(ctx context.Context, providerID, capabilityID string, input contracts.UpdateExternalCapabilityPayload) (domain.ExternalCalibrationCapability, error) {
+	var updated domain.ExternalCalibrationCapability
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		trimmedProviderID := strings.TrimSpace(providerID)
+		provider, exists := m.ExternalProvider(trimmedProviderID)
+		if !exists {
+			return fmt.Errorf("%w: external calibration provider %s", domain.ErrNotFound, providerID)
+		}
+		item, exists := m.ExternalCapability(provider.ID, strings.TrimSpace(capabilityID))
+		if !exists {
+			return fmt.Errorf("%w: external calibration capability %s for provider %s", domain.ErrNotFound, capabilityID, providerID)
+		}
+		if err := item.Update(input.CertificateNumber, input.Scope, input.Unit, input.MinValue, input.MaxValue, input.ValidFrom, input.ValidUntil, s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateExternalCapability(item); err != nil {
+			return err
+		}
+		maintainer := strings.TrimSpace(input.Maintainer)
+		if maintainer == "" {
+			maintainer = provider.Maintainer
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"external_calibration_provider",
+			provider.ID,
+			"",
+			"external_capability_updated",
+			maintainer,
+			fmt.Sprintf("external calibration capability %s updated to version %d; existing references remain frozen", item.ID, item.Version),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		updated = item
+		return nil
+	})
+	return updated, err
+}
+
 func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest) (contracts.CaseResponse, error) {
 	var result contracts.CaseResponse
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
@@ -96,6 +303,8 @@ func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest)
 			device.ID,
 			input.Nominal,
 			input.Tolerance,
+			input.Scope,
+			input.Unit,
 			input.Steward,
 			s.now(),
 		)
@@ -146,6 +355,29 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
+		at := s.now()
+		var basis *domain.ExternalCalibrationBasis
+		if basisID := strings.TrimSpace(input.ExternalCapabilityID); basisID != "" {
+			capability, exists := m.ExternalCapabilityByID(basisID)
+			if !exists {
+				return fmt.Errorf("%w: external calibration capability %s", domain.ErrExternalBasisUnavailable, basisID)
+			}
+			if item.Scope == "" || item.Unit == "" {
+				return fmt.Errorf("%w: case %s must declare the same scope and unit before referencing an external basis", domain.ErrExternalBasisUnavailable, item.ID)
+			}
+			provider, exists := m.ExternalProvider(capability.ProviderID)
+			if !exists {
+				return fmt.Errorf("%w: external calibration provider for capability %s", domain.ErrExternalBasisUnavailable, capability.ID)
+			}
+			if err := capability.Covers(item.Scope, item.Unit, item.Nominal, input.Observed, at); err != nil {
+				return err
+			}
+			captured, err := domain.NewExternalCalibrationBasis(capability, provider, at)
+			if err != nil {
+				return err
+			}
+			basis = &captured
+		}
 		measurement, err := domain.NewMeasurement(
 			m.NextID("measurement"),
 			item.ID,
@@ -153,12 +385,13 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			item.Nominal,
 			item.Tolerance,
 			input.Technician,
-			s.now(),
+			basis,
+			at,
 		)
 		if err != nil {
 			return err
 		}
-		if err := item.RecordMeasurement(measurement.Accepted, s.now()); err != nil {
+		if err := item.RecordMeasurement(measurement.Accepted, at); err != nil {
 			return err
 		}
 		if err := m.AppendMeasurement(measurement); err != nil {
@@ -173,6 +406,19 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			kind = "measurement_accepted"
 			detail = "measurement is within tolerance and ready for review"
 		}
+		if basis != nil {
+			detail = fmt.Sprintf("%s; external basis %s from %s, capability %s, scope %s %s, valid %s to %s, referenced at %s",
+				detail,
+				basis.CertificateNumber,
+				basis.ProviderName,
+				basis.CapabilityID,
+				basis.Scope,
+				basis.Unit,
+				basis.ValidFrom.Format("2006-01-02"),
+				basis.ValidUntil.Format("2006-01-02"),
+				basis.ReferencedAt.UTC().Format(time.RFC3339),
+			)
+		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
 			"case",
@@ -181,7 +427,7 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 			kind,
 			measurement.Technician,
 			detail,
-			s.now(),
+			at,
 		)
 		if err != nil {
 			return err
@@ -257,6 +503,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			measurement.ID,
 			input.Reviewer,
 			input.Summary,
+			measurement.ExternalBasis,
 			s.now(),
 		)
 		if err != nil {
@@ -268,6 +515,16 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 		if err := m.UpdateCase(item); err != nil {
 			return err
 		}
+		sealDetail := seal.Summary
+		if seal.ExternalBasis != nil {
+			sealDetail = fmt.Sprintf("%s; sealed evidence retains external basis %s from %s capability %s referenced at %s",
+				sealDetail,
+				seal.ExternalBasis.CertificateNumber,
+				seal.ExternalBasis.ProviderName,
+				seal.ExternalBasis.CapabilityID,
+				seal.ExternalBasis.ReferencedAt.UTC().Format(time.RFC3339),
+			)
+		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
 			"case",
@@ -275,7 +532,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			item.ID,
 			"case_sealed",
 			seal.Reviewer,
-			seal.Summary,
+			sealDetail,
 			s.now(),
 		)
 		if err != nil {
@@ -301,6 +558,28 @@ func bestAcceptedMeasurement(items []domain.Measurement) (domain.Measurement, bo
 		}
 	}
 	return selected, found
+}
+
+type externalProviderReader interface {
+	ExternalCapabilities(providerID string) []domain.ExternalCalibrationCapability
+	ProviderEvents(providerID string) []domain.AuditEvent
+}
+
+func providerDetail(reader externalProviderReader, item domain.ExternalCalibrationProvider) contracts.ExternalProviderDetailResponse {
+	capabilities := reader.ExternalCapabilities(item.ID)
+	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i].ID < capabilities[j].ID })
+	events := reader.ProviderEvents(item.ID)
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+			return events[i].ID < events[j].ID
+		}
+		return events[i].CreatedAt.Before(events[j].CreatedAt)
+	})
+	return contracts.ExternalProviderDetailResponse{
+		Provider:     item,
+		Capabilities: capabilities,
+		Events:       events,
+	}
 }
 
 func caseResponse(m *repository.Mutation, item domain.VerificationCase) contracts.CaseResponse {

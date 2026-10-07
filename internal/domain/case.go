@@ -21,6 +21,8 @@ type VerificationCase struct {
 	DeviceID  string     `json:"device_id"`
 	Nominal   float64    `json:"nominal"`
 	Tolerance float64    `json:"tolerance"`
+	Scope     string     `json:"scope,omitempty"`
+	Unit      string     `json:"unit,omitempty"`
 	Steward   string     `json:"steward"`
 	State     CaseState  `json:"state"`
 	Version   int        `json:"version"`
@@ -29,12 +31,14 @@ type VerificationCase struct {
 	SealedAt  *time.Time `json:"sealed_at,omitempty"`
 }
 
-func NewVerificationCase(id, deviceID string, nominal, tolerance float64, steward string, at time.Time) (VerificationCase, error) {
+func NewVerificationCase(id, deviceID string, nominal, tolerance float64, scope, unit, steward string, at time.Time) (VerificationCase, error) {
 	item := VerificationCase{
 		ID:        strings.TrimSpace(id),
 		DeviceID:  strings.TrimSpace(deviceID),
 		Nominal:   nominal,
 		Tolerance: tolerance,
+		Scope:     NormalizeScope(scope),
+		Unit:      normalizeUnit(unit),
 		Steward:   strings.TrimSpace(steward),
 		State:     CaseAwaitingMeasurement,
 		Version:   1,
@@ -53,6 +57,9 @@ func (c VerificationCase) Validate() error {
 	}
 	if !isFinite(c.Nominal) || !isFinite(c.Tolerance) || c.Tolerance <= 0 {
 		return fmt.Errorf("%w: nominal must be finite and tolerance must be positive", ErrInvalidInput)
+	}
+	if len(c.Scope) > 64 || len(c.Unit) > 32 || (c.Scope == "") != (c.Unit == "") {
+		return fmt.Errorf("%w: scope and unit must both be omitted or both provided", ErrInvalidInput)
 	}
 	if c.Version < 1 || c.OpenedAt.IsZero() || c.UpdatedAt.IsZero() {
 		return fmt.Errorf("%w: case version and timestamps are required", ErrInvalidInput)

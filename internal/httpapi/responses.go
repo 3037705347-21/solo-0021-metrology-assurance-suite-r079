@@ -54,6 +54,10 @@ func errorStatus(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case errors.Is(err, domain.ErrDuplicateAssetTag):
 		return http.StatusConflict, "duplicate_asset_tag"
+	case errors.Is(err, domain.ErrDuplicateProvider):
+		return http.StatusConflict, "duplicate_external_calibration_provider"
+	case errors.Is(err, domain.ErrExternalBasisUnavailable):
+		return http.StatusConflict, "external_basis_unavailable"
 	case errors.Is(err, domain.ErrActiveCaseExists):
 		return http.StatusConflict, "active_case_exists"
 	case errors.Is(err, domain.ErrSealAlreadyCreated):

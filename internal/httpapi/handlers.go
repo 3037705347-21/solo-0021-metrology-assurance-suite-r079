@@ -106,3 +106,95 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
 }
+
+func (s *Server) externalProviders(writer http.ResponseWriter, request *http.Request) {
+	providers, err := s.service.ExternalProviders(request.Context())
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"providers": providers})
+}
+
+func (s *Server) registerExternalProvider(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterExternalProviderRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	provider, err := s.service.RegisterExternalProvider(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.ExternalProviderResponse{Provider: provider})
+}
+
+func (s *Server) externalProvider(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.ExternalProvider(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) externalProviderEvents(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.ExternalProvider(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
+}
+
+func (s *Server) updateExternalProvider(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.UpdateExternalProviderRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.UpdateExternalProvider(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) registerExternalCapability(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterExternalCapabilityPayload](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	capability, err := s.service.RegisterExternalCapability(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.ExternalCapabilityResponse{Capability: capability})
+}
+
+func (s *Server) externalCapability(writer http.ResponseWriter, request *http.Request) {
+	capability, err := s.service.ExternalCapability(request.Context(), request.PathValue("id"), request.PathValue("capabilityId"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.ExternalCapabilityResponse{Capability: capability})
+}
+
+func (s *Server) updateExternalCapability(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.UpdateExternalCapabilityPayload](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	capability, err := s.service.UpdateExternalCapability(request.Context(), request.PathValue("id"), request.PathValue("capabilityId"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, contracts.ExternalCapabilityResponse{Capability: capability})
+}

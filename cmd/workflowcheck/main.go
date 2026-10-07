@@ -35,11 +35,12 @@ func main() {
 	flag.Parse()
 
 	checks := map[string]func() error{
-		"register-device":          checkRegisterDevice,
-		"open-verification-case":   checkOpenVerificationCase,
-		"record-measurement":       checkRecordMeasurement,
-		"reopen-verification-case": checkReopenVerificationCase,
-		"seal-verification":        checkSealVerification,
+		"register-device":            checkRegisterDevice,
+		"open-verification-case":     checkOpenVerificationCase,
+		"record-measurement":         checkRecordMeasurement,
+		"reopen-verification-case":   checkReopenVerificationCase,
+		"seal-verification":          checkSealVerification,
+		"external-calibration-basis": checkExternalCalibrationBasis,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +376,259 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkExternalCalibrationBasis() error {
+	h := newHarness()
+	defer h.close()
+
+	provider, err := h.request(http.MethodPost, "/external-calibration-providers", map[string]any{
+		"name":                 " Precision Calibration Lab ",
+		"accreditation_number": "AC-77",
+		"accreditation_body":   "National Accreditation Board",
+		"maintainer":           "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(provider, http.StatusCreated); err != nil {
+		return err
+	}
+	providerID, err := nestedString(provider.Body, "provider", "id")
+	if err != nil {
+		return err
+	}
+	providerName, err := nestedString(provider.Body, "provider", "name")
+	if err != nil {
+		return err
+	}
+	if providerName != "Precision Calibration Lab" {
+		return fmt.Errorf("provider name was not normalized: %q", providerName)
+	}
+
+	capability, err := h.request(http.MethodPost, "/external-calibration-providers/"+providerID+"/capabilities", map[string]any{
+		"certificate_number": "CERT-2026-01",
+		"scope":              " temperature ",
+		"unit":               "C",
+		"min_value":          0.0,
+		"max_value":          50.0,
+		"valid_from":         "2026-01-01",
+		"valid_until":        "2026-12-31T23:59:59Z",
+		"maintainer":         "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(capability, http.StatusCreated); err != nil {
+		return err
+	}
+	capabilityID, err := nestedString(capability.Body, "capability", "id")
+	if err != nil {
+		return err
+	}
+	scope, err := nestedString(capability.Body, "capability", "scope")
+	if err != nil {
+		return err
+	}
+	if scope != "TEMPERATURE" {
+		return fmt.Errorf("scope was not normalized: %q", scope)
+	}
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"scope":     "temperature",
+		"unit":      "C",
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(opened, http.StatusCreated); err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	measured, err := h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
+		"observed":               25.2,
+		"technician":             "Rui",
+		"external_capability_id": capabilityID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(measured, http.StatusCreated); err != nil {
+		return err
+	}
+	basisProvider, err := nestedString(measured.Body, "measurements", 0, "external_basis", "provider_name")
+	if err != nil {
+		return err
+	}
+	if basisProvider != providerName {
+		return fmt.Errorf("measurement source provider = %q", basisProvider)
+	}
+	outOfRangeCapability, err := h.request(http.MethodPost, "/external-calibration-providers/"+providerID+"/capabilities", map[string]any{
+		"certificate_number": "CERT-2026-02",
+		"scope":              "temperature",
+		"unit":               "c",
+		"min_value":          0.0,
+		"max_value":          50.0,
+		"valid_from":         "2026-01-01",
+		"valid_until":        "2026-12-31",
+		"maintainer":         "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	outOfRangeCapabilityID, err := nestedString(outOfRangeCapability.Body, "capability", "id")
+	if err != nil {
+		return err
+	}
+	outOfRangeDeviceID, err := h.createDevice("MET-1503")
+	if err != nil {
+		return err
+	}
+	outOfRangeCase, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": outOfRangeDeviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"scope":     "temperature",
+		"unit":      "C",
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	outOfRangeCaseID, err := nestedString(outOfRangeCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	outOfRange, err := h.request(http.MethodPost, "/cases/"+outOfRangeCaseID+"/measurements", map[string]any{
+		"observed":               60.0,
+		"technician":             "Rui",
+		"external_capability_id": outOfRangeCapabilityID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(outOfRange, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(outOfRange, "external_basis_unavailable"); err != nil {
+		return err
+	}
+
+	updated, err := h.request(http.MethodPut, "/external-calibration-providers/"+providerID+"/capabilities/"+capabilityID, map[string]any{
+		"certificate_number": "CERT-2027-NEW",
+		"scope":              "pressure",
+		"unit":               "kPa",
+		"min_value":          90.0,
+		"max_value":          110.0,
+		"valid_from":         "2030-01-01",
+		"valid_until":        "2030-12-31",
+		"maintainer":         "Mira",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(updated, http.StatusOK); err != nil {
+		return err
+	}
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	frozenCertificate, err := nestedString(read.Body, "measurements", 0, "external_basis", "certificate_number")
+	if err != nil {
+		return err
+	}
+	if frozenCertificate != "CERT-2026-01" {
+		return fmt.Errorf("measurement basis was rewritten by capability maintenance: %q", frozenCertificate)
+	}
+	if !hasEventDetail(read.Body, "external basis CERT-2026-01") {
+		return errors.New("measurement event does not explain the external basis source")
+	}
+
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Shen",
+		"summary":  "external calibration basis retained",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	sealCertificate, err := nestedString(sealed.Body, "seal", "external_basis", "certificate_number")
+	if err != nil {
+		return err
+	}
+	if sealCertificate != "CERT-2026-01" {
+		return fmt.Errorf("sealed basis was rewritten by capability maintenance: %q", sealCertificate)
+	}
+
+	expiredDeviceID, err := h.createDevice("MET-1502")
+	if err != nil {
+		return err
+	}
+	expiredCase, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": expiredDeviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"scope":     "pressure",
+		"unit":      "kPa",
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	expiredCaseID, err := nestedString(expiredCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	rejected, err := h.request(http.MethodPost, "/cases/"+expiredCaseID+"/measurements", map[string]any{
+		"observed":               100.0,
+		"technician":             "Rui",
+		"external_capability_id": capabilityID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(rejected, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(rejected, "external_basis_unavailable"); err != nil {
+		return err
+	}
+
+	detail, err := h.request(http.MethodGet, "/external-calibration-providers/"+providerID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(detail, http.StatusOK); err != nil {
+		return err
+	}
+	items, err := nestedSlice(detail.Body, "capabilities")
+	if err != nil {
+		return err
+	}
+	if len(items) != 2 {
+		return fmt.Errorf("provider detail has %d capabilities, expected 2", len(items))
+	}
+	if !hasEventDetail(detail.Body, "existing references remain frozen") {
+		return errors.New("provider detail does not explain capability maintenance")
+	}
+	return nil
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -527,16 +781,24 @@ func expectErrorCode(response apiResponse, expected string) error {
 	return nil
 }
 
-func nestedString(root map[string]any, path ...string) (string, error) {
-	value, err := nestedValue(root, path...)
+func nestedString(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
 	if err != nil {
 		return "", err
 	}
 	text, ok := value.(string)
 	if !ok {
-		return "", fmt.Errorf("%s is not a string", strings.Join(path, "."))
+		return "", fmt.Errorf("%v is not a string", path)
 	}
 	return text, nil
+}
+
+func nestedStringPath(root map[string]any, path ...string) (string, error) {
+	parts := make([]any, 0, len(path))
+	for _, part := range path {
+		parts = append(parts, part)
+	}
+	return nestedString(root, parts...)
 }
 
 func nestedBool(root map[string]any, path ...any) (bool, error) {
@@ -574,6 +836,24 @@ func hasEvent(root map[string]any, kind string) bool {
 			continue
 		}
 		if event["kind"] == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEventDetail(root map[string]any, fragment string) bool {
+	items, err := nestedSlice(root, "events")
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		event, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		detail, _ := event["detail"].(string)
+		if strings.Contains(detail, fragment) {
 			return true
 		}
 	}
