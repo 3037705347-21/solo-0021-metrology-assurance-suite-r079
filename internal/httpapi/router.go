@@ -30,6 +30,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /cases/{id}/reopen", s.reopenCase)
 	s.mux.HandleFunc("POST /cases/{id}/seal", s.sealCase)
 	s.mux.HandleFunc("GET /cases/{id}/events", s.events)
+	s.mux.HandleFunc("POST /labs", s.registerLab)
+	s.mux.HandleFunc("GET /labs/{id}", s.lab)
+	s.mux.HandleFunc("POST /labs/{id}/scopes", s.addScope)
+	s.mux.HandleFunc("PUT /labs/{id}/scopes/{scopeID}", s.updateScope)
+	s.mux.HandleFunc("POST /labs/{id}/suspend", s.suspendLab)
+	s.mux.HandleFunc("POST /labs/{id}/reinstate", s.reinstateLab)
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

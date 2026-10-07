@@ -35,11 +35,16 @@ func main() {
 	flag.Parse()
 
 	checks := map[string]func() error{
-		"register-device":          checkRegisterDevice,
-		"open-verification-case":   checkOpenVerificationCase,
-		"record-measurement":       checkRecordMeasurement,
-		"reopen-verification-case": checkReopenVerificationCase,
-		"seal-verification":        checkSealVerification,
+		"register-device":                   checkRegisterDevice,
+		"open-verification-case":            checkOpenVerificationCase,
+		"record-measurement":                checkRecordMeasurement,
+		"reopen-verification-case":          checkReopenVerificationCase,
+		"seal-verification":                 checkSealVerification,
+		"register-calibration-lab":          checkRegisterCalibrationLab,
+		"maintain-capability-scope":         checkMaintainCapabilityScope,
+		"record-external-measurement":       checkRecordExternalMeasurement,
+		"reject-unavailable-external-basis": checkRejectUnavailableExternalBasis,
+		"preserve-external-basis-history":   checkPreserveExternalBasisHistory,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +380,576 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkRegisterCalibrationLab() error {
+	h := newHarness()
+	defer h.close()
+
+	response, err := h.request(http.MethodPost, "/labs", map[string]any{
+		"name":          "  Acme Metrology  ",
+		"accreditation": "CNAS L0001",
+		"steward":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return err
+	}
+	id, err := nestedString(response.Body, "lab", "id")
+	if err != nil {
+		return err
+	}
+	name, err := nestedString(response.Body, "lab", "name")
+	if err != nil {
+		return err
+	}
+	if name != "Acme Metrology" {
+		return fmt.Errorf("lab name was not trimmed: %q", name)
+	}
+	status, err := nestedString(response.Body, "lab", "status")
+	if err != nil {
+		return err
+	}
+	if status != "active" {
+		return fmt.Errorf("new lab status = %q", status)
+	}
+
+	read, err := h.request(http.MethodGet, "/labs/"+id, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	readID, err := nestedString(read.Body, "lab", "id")
+	if err != nil {
+		return err
+	}
+	if readID != id {
+		return fmt.Errorf("read returned lab %q, expected %q", readID, id)
+	}
+	if !hasEvent(read.Body, "lab_registered") {
+		return errors.New("lab_registered audit event is missing")
+	}
+
+	duplicate, err := h.request(http.MethodPost, "/labs", map[string]any{
+		"name":          "ACME METROLOGY",
+		"accreditation": "CNAS L9999",
+		"steward":       "Mira",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "duplicate_lab_name"); err != nil {
+		return err
+	}
+
+	incomplete, err := h.request(http.MethodPost, "/labs", map[string]any{
+		"name": "No Accreditation Lab",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(incomplete, http.StatusBadRequest); err != nil {
+		return err
+	}
+	return expectErrorCode(incomplete, "invalid_input")
+}
+
+func checkMaintainCapabilityScope() error {
+	h := newHarness()
+	defer h.close()
+
+	labID, err := h.createLab("Scope Lab")
+	if err != nil {
+		return err
+	}
+	scopeID, err := h.addScope(labID, "dc_voltage", 0, 100, "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+
+	read, err := h.request(http.MethodGet, "/labs/"+labID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	scopes, err := nestedSlice(read.Body, "scopes")
+	if err != nil {
+		return err
+	}
+	if len(scopes) != 1 {
+		return fmt.Errorf("lab has %d scopes, expected 1", len(scopes))
+	}
+	parameter, err := nestedStringPath(read.Body, "scopes", 0, "parameter")
+	if err != nil {
+		return err
+	}
+	if parameter != "dc_voltage" {
+		return fmt.Errorf("scope parameter = %q", parameter)
+	}
+
+	badRange, err := h.request(http.MethodPost, "/labs/"+labID+"/scopes", map[string]any{
+		"parameter":   "dc_voltage",
+		"min_value":   50.0,
+		"max_value":   10.0,
+		"uncertainty": 0.01,
+		"valid_from":  "2020-01-01T00:00:00Z",
+		"valid_until": "2030-01-01T00:00:00Z",
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(badRange, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(badRange, "invalid_input"); err != nil {
+		return err
+	}
+
+	badWindow, err := h.request(http.MethodPost, "/labs/"+labID+"/scopes", map[string]any{
+		"parameter":   "dc_voltage",
+		"min_value":   0.0,
+		"max_value":   100.0,
+		"uncertainty": 0.01,
+		"valid_from":  "2030-01-01T00:00:00Z",
+		"valid_until": "2020-01-01T00:00:00Z",
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(badWindow, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(badWindow, "invalid_input"); err != nil {
+		return err
+	}
+
+	updated, err := h.request(http.MethodPut, "/labs/"+labID+"/scopes/"+scopeID, map[string]any{
+		"parameter":   "dc_voltage",
+		"min_value":   0.0,
+		"max_value":   100.0,
+		"uncertainty": 0.01,
+		"valid_from":  "2020-01-01T00:00:00Z",
+		"valid_until": "2031-06-30T00:00:00Z",
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(updated, http.StatusOK); err != nil {
+		return err
+	}
+	validUntil, err := nestedStringPath(updated.Body, "scopes", 0, "valid_until")
+	if err != nil {
+		return err
+	}
+	if validUntil != "2031-06-30T00:00:00Z" {
+		return fmt.Errorf("updated scope valid_until = %q", validUntil)
+	}
+	if !hasEvent(updated.Body, "lab_scope_added") {
+		return errors.New("lab_scope_added audit event is missing")
+	}
+	if !hasEvent(updated.Body, "lab_scope_updated") {
+		return errors.New("lab_scope_updated audit event is missing")
+	}
+
+	otherLabID, err := h.createLab("Other Lab")
+	if err != nil {
+		return err
+	}
+	foreign, err := h.request(http.MethodPut, "/labs/"+otherLabID+"/scopes/"+scopeID, map[string]any{
+		"parameter":   "dc_voltage",
+		"min_value":   0.0,
+		"max_value":   100.0,
+		"uncertainty": 0.01,
+		"valid_from":  "2020-01-01T00:00:00Z",
+		"valid_until": "2031-06-30T00:00:00Z",
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(foreign, http.StatusNotFound); err != nil {
+		return err
+	}
+	return expectErrorCode(foreign, "not_found")
+}
+
+func checkRecordExternalMeasurement() error {
+	h := newHarness()
+	defer h.close()
+
+	labID, err := h.createLab("Acme Metrology")
+	if err != nil {
+		return err
+	}
+	scopeID, err := h.addScope(labID, "dc_voltage", 0, 100, "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	recorded, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", labID, scopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(recorded, http.StatusCreated); err != nil {
+		return err
+	}
+	state, err := nestedString(recorded.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "review_ready" {
+		return fmt.Errorf("external measurement state = %q", state)
+	}
+	labName, err := nestedStringPath(recorded.Body, "measurements", 0, "external_basis", "lab_name")
+	if err != nil {
+		return err
+	}
+	if labName != "Acme Metrology" {
+		return fmt.Errorf("external basis lab name = %q", labName)
+	}
+	basisScope, err := nestedStringPath(recorded.Body, "measurements", 0, "external_basis", "scope_id")
+	if err != nil {
+		return err
+	}
+	if basisScope != scopeID {
+		return fmt.Errorf("external basis scope = %q, expected %q", basisScope, scopeID)
+	}
+	accreditation, err := nestedStringPath(recorded.Body, "measurements", 0, "external_basis", "accreditation")
+	if err != nil {
+		return err
+	}
+	if accreditation != "CNAS L0001" {
+		return fmt.Errorf("external basis accreditation = %q", accreditation)
+	}
+	referencedAt, err := nestedStringPath(recorded.Body, "measurements", 0, "external_basis", "referenced_at")
+	if err != nil {
+		return err
+	}
+	if referencedAt == "" {
+		return errors.New("external basis reference time is missing")
+	}
+	if !eventDetailContains(recorded.Body, "measurement_accepted", scopeID) {
+		return errors.New("measurement event does not explain the external basis source")
+	}
+
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	readScope, err := nestedStringPath(read.Body, "measurements", 0, "external_basis", "scope_id")
+	if err != nil {
+		return err
+	}
+	if readScope != scopeID {
+		return fmt.Errorf("case detail external basis scope = %q, expected %q", readScope, scopeID)
+	}
+	if !eventDetailContains(read.Body, "measurement_accepted", "Acme Metrology") {
+		return errors.New("case detail events do not explain the external basis source")
+	}
+	return nil
+}
+
+func checkRejectUnavailableExternalBasis() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1601")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+
+	expiredLabID, err := h.createLab("Expired Lab")
+	if err != nil {
+		return err
+	}
+	expiredScopeID, err := h.addScope(expiredLabID, "dc_voltage", 0, 100, "2020-01-01T00:00:00Z", "2021-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+	expired, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", expiredLabID, expiredScopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(expired, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(expired, "capability_unavailable"); err != nil {
+		return err
+	}
+
+	narrowLabID, err := h.createLab("Narrow Lab")
+	if err != nil {
+		return err
+	}
+	narrowScopeID, err := h.addScope(narrowLabID, "dc_voltage", 0, 10, "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+	mismatch, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", narrowLabID, narrowScopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(mismatch, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(mismatch, "scope_mismatch"); err != nil {
+		return err
+	}
+
+	suspendedLabID, err := h.createLab("Suspended Lab")
+	if err != nil {
+		return err
+	}
+	suspendedScopeID, err := h.addScope(suspendedLabID, "dc_voltage", 0, 100, "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+	suspended, err := h.request(http.MethodPost, "/labs/"+suspendedLabID+"/suspend", map[string]any{
+		"actor":  "Lin",
+		"reason": "accreditation withdrawn by the accrediting body",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(suspended, http.StatusOK); err != nil {
+		return err
+	}
+	suspendedAttempt, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", suspendedLabID, suspendedScopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(suspendedAttempt, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(suspendedAttempt, "capability_unavailable"); err != nil {
+		return err
+	}
+
+	unknown, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", "lab-9999", "scope-9999")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(unknown, http.StatusNotFound); err != nil {
+		return err
+	}
+	if err := expectErrorCode(unknown, "not_found"); err != nil {
+		return err
+	}
+
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	state, err := nestedString(read.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if state != "awaiting_measurement" {
+		return fmt.Errorf("rejected references changed case state to %q", state)
+	}
+	measurementCount, err := nestedSliceLen(read.Body, "measurements")
+	if err != nil {
+		return err
+	}
+	if measurementCount != 0 {
+		return fmt.Errorf("rejected references recorded %d measurements", measurementCount)
+	}
+
+	reinstated, err := h.request(http.MethodPost, "/labs/"+suspendedLabID+"/reinstate", map[string]any{
+		"actor": "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(reinstated, http.StatusOK); err != nil {
+		return err
+	}
+	accepted, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", suspendedLabID, suspendedScopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(accepted, http.StatusCreated); err != nil {
+		return err
+	}
+	finalState, err := nestedString(accepted.Body, "case", "state")
+	if err != nil {
+		return err
+	}
+	if finalState != "review_ready" {
+		return fmt.Errorf("reinstated lab measurement state = %q", finalState)
+	}
+	return nil
+}
+
+func checkPreserveExternalBasisHistory() error {
+	h := newHarness()
+	defer h.close()
+
+	labID, err := h.createLab("History Lab")
+	if err != nil {
+		return err
+	}
+	scopeID, err := h.addScope(labID, "dc_voltage", 0, 100, "2020-01-01T00:00:00Z", "2030-01-01T00:00:00Z")
+	if err != nil {
+		return err
+	}
+	deviceID, err := h.createDevice("MET-1701")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	recorded, err := h.recordMeasurementWithBasis(caseID, 25.2, "Rui", labID, scopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(recorded, http.StatusCreated); err != nil {
+		return err
+	}
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Wei",
+		"summary":  "external calibration result sealed",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+	sealedScope, err := nestedStringPath(sealed.Body, "seal", "external_basis", "scope_id")
+	if err != nil {
+		return err
+	}
+	if sealedScope != scopeID {
+		return fmt.Errorf("sealed basis scope = %q, expected %q", sealedScope, scopeID)
+	}
+
+	updated, err := h.request(http.MethodPut, "/labs/"+labID+"/scopes/"+scopeID, map[string]any{
+		"parameter":   "dc_voltage",
+		"min_value":   0.0,
+		"max_value":   10.0,
+		"uncertainty": 0.01,
+		"valid_from":  "2020-01-01T00:00:00Z",
+		"valid_until": "2021-01-01T00:00:00Z",
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(updated, http.StatusOK); err != nil {
+		return err
+	}
+	suspended, err := h.request(http.MethodPost, "/labs/"+labID+"/suspend", map[string]any{
+		"actor":  "Lin",
+		"reason": "accreditation lapsed",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(suspended, http.StatusOK); err != nil {
+		return err
+	}
+
+	read, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	maxValue, err := nestedNumber(read.Body, "measurements", 0, "external_basis", "max_value")
+	if err != nil {
+		return err
+	}
+	if maxValue != 100 {
+		return fmt.Errorf("maintenance rewrote measurement basis max_value to %g", maxValue)
+	}
+	basisValidUntil, err := nestedStringPath(read.Body, "measurements", 0, "external_basis", "valid_until")
+	if err != nil {
+		return err
+	}
+	if basisValidUntil != "2030-01-01T00:00:00Z" {
+		return fmt.Errorf("maintenance rewrote measurement basis valid_until to %q", basisValidUntil)
+	}
+	sealMaxValue, err := nestedNumber(read.Body, "seal", "external_basis", "max_value")
+	if err != nil {
+		return err
+	}
+	if sealMaxValue != 100 {
+		return fmt.Errorf("maintenance rewrote sealed basis max_value to %g", sealMaxValue)
+	}
+	sealValidUntil, err := nestedStringPath(read.Body, "seal", "external_basis", "valid_until")
+	if err != nil {
+		return err
+	}
+	if sealValidUntil != "2030-01-01T00:00:00Z" {
+		return fmt.Errorf("maintenance rewrote sealed basis valid_until to %q", sealValidUntil)
+	}
+
+	secondDeviceID, err := h.createDevice("MET-1702")
+	if err != nil {
+		return err
+	}
+	secondOpened, err := h.openCase(secondDeviceID)
+	if err != nil {
+		return err
+	}
+	secondCaseID, err := nestedString(secondOpened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	attempt, err := h.recordMeasurementWithBasis(secondCaseID, 25.2, "Rui", labID, scopeID)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(attempt, http.StatusConflict); err != nil {
+		return err
+	}
+	return expectErrorCode(attempt, "capability_unavailable")
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -463,6 +1038,51 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	})
 }
 
+func (h *harness) recordMeasurementWithBasis(caseID string, observed float64, technician, labID, scopeID string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/cases/"+caseID+"/measurements", map[string]any{
+		"observed":   observed,
+		"technician": technician,
+		"external_basis": map[string]any{
+			"lab_id":   labID,
+			"scope_id": scopeID,
+		},
+	})
+}
+
+func (h *harness) createLab(name string) (string, error) {
+	response, err := h.request(http.MethodPost, "/labs", map[string]any{
+		"name":          name,
+		"accreditation": "CNAS L0001",
+		"steward":       "Lin",
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedString(response.Body, "lab", "id")
+}
+
+func (h *harness) addScope(labID, parameter string, minValue, maxValue float64, validFrom, validUntil string) (string, error) {
+	response, err := h.request(http.MethodPost, "/labs/"+labID+"/scopes", map[string]any{
+		"parameter":   parameter,
+		"min_value":   minValue,
+		"max_value":   maxValue,
+		"uncertainty": 0.01,
+		"valid_from":  validFrom,
+		"valid_until": validUntil,
+		"actor":       "Lin",
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := expectStatus(response, http.StatusCreated); err != nil {
+		return "", err
+	}
+	return nestedStringPath(response.Body, "scopes", 0, "id")
+}
+
 func (h *harness) rejectedCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
@@ -539,6 +1159,30 @@ func nestedString(root map[string]any, path ...string) (string, error) {
 	return text, nil
 }
 
+func nestedStringPath(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
+	}
+	return text, nil
+}
+
+func nestedNumber(root map[string]any, path ...any) (float64, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return 0, err
+	}
+	number, ok := value.(float64)
+	if !ok {
+		return 0, fmt.Errorf("%v is not a number", path)
+	}
+	return number, nil
+}
+
 func nestedBool(root map[string]any, path ...any) (bool, error) {
 	value, err := nestedAny(root, path...)
 	if err != nil {
@@ -563,6 +1207,23 @@ func nestedSlice(root map[string]any, key string) ([]any, error) {
 	return items, nil
 }
 
+// nestedSliceLen tolerates a null array, which the service emits for
+// collections that have no entries yet.
+func nestedSliceLen(root map[string]any, key string) (int, error) {
+	value, ok := root[key]
+	if !ok {
+		return 0, fmt.Errorf("missing %s", key)
+	}
+	if value == nil {
+		return 0, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return 0, fmt.Errorf("%s is not an array", key)
+	}
+	return len(items), nil
+}
+
 func hasEvent(root map[string]any, kind string) bool {
 	items, err := nestedSlice(root, "events")
 	if err != nil {
@@ -574,6 +1235,27 @@ func hasEvent(root map[string]any, kind string) bool {
 			continue
 		}
 		if event["kind"] == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func eventDetailContains(root map[string]any, kind, fragment string) bool {
+	items, err := nestedSlice(root, "events")
+	if err != nil {
+		return false
+	}
+	for _, item := range items {
+		event, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if event["kind"] != kind {
+			continue
+		}
+		detail, ok := event["detail"].(string)
+		if ok && strings.Contains(detail, fragment) {
 			return true
 		}
 	}

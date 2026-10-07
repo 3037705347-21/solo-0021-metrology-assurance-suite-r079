@@ -7,15 +7,16 @@ import (
 )
 
 type Measurement struct {
-	ID         string    `json:"id"`
-	CaseID     string    `json:"case_id"`
-	Observed   float64   `json:"observed"`
-	Nominal    float64   `json:"nominal"`
-	Deviation  float64   `json:"deviation"`
-	Tolerance  float64   `json:"tolerance"`
-	Accepted   bool      `json:"accepted"`
-	Technician string    `json:"technician"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID            string         `json:"id"`
+	CaseID        string         `json:"case_id"`
+	Observed      float64        `json:"observed"`
+	Nominal       float64        `json:"nominal"`
+	Deviation     float64        `json:"deviation"`
+	Tolerance     float64        `json:"tolerance"`
+	Accepted      bool           `json:"accepted"`
+	Technician    string         `json:"technician"`
+	ExternalBasis *ExternalBasis `json:"external_basis,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 func NewMeasurement(id, caseID string, observed, nominal, tolerance float64, technician string, at time.Time) (Measurement, error) {
@@ -46,6 +47,21 @@ func (m Measurement) Validate() error {
 	if m.CreatedAt.IsZero() {
 		return fmt.Errorf("%w: measurement time is required", ErrInvalidInput)
 	}
+	if m.ExternalBasis != nil {
+		if err := m.ExternalBasis.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AttachExternalBasis pins an immutable snapshot of the external calibration
+// capability that backs this measurement.
+func (m *Measurement) AttachExternalBasis(basis ExternalBasis) error {
+	if err := basis.Validate(); err != nil {
+		return err
+	}
+	m.ExternalBasis = &basis
 	return nil
 }
 

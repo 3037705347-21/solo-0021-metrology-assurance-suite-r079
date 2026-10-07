@@ -14,6 +14,8 @@ type Repository struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	labs         map[string]domain.CalibrationLab
+	scopes       map[string]domain.CapabilityScope
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -24,6 +26,8 @@ func New() *Repository {
 		cases:        make(map[string]domain.VerificationCase),
 		measurements: make(map[string][]domain.Measurement),
 		seals:        make(map[string]domain.EvidenceSeal),
+		labs:         make(map[string]domain.CalibrationLab),
+		scopes:       make(map[string]domain.CapabilityScope),
 		counters:     make(map[string]int),
 	}
 }
@@ -33,6 +37,8 @@ type Snapshot struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	labs         map[string]domain.CalibrationLab
+	scopes       map[string]domain.CapabilityScope
 	events       []domain.AuditEvent
 }
 
@@ -74,6 +80,36 @@ func (s Snapshot) Events(caseID string) []domain.AuditEvent {
 	return result
 }
 
+func (s Snapshot) EventsForSubject(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range s.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (s Snapshot) Lab(id string) (domain.CalibrationLab, bool) {
+	item, ok := s.labs[id]
+	return item, ok
+}
+
+func (s Snapshot) Scope(id string) (domain.CapabilityScope, bool) {
+	item, ok := s.scopes[id]
+	return item, ok
+}
+
+func (s Snapshot) ScopesForLab(labID string) []domain.CapabilityScope {
+	var result []domain.CapabilityScope
+	for _, item := range s.scopes {
+		if item.LabID == labID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
 func (s Snapshot) AllDevices() []domain.Device {
 	result := make([]domain.Device, 0, len(s.devices))
 	for _, item := range s.devices {
@@ -95,6 +131,8 @@ type Mutation struct {
 	cases        map[string]domain.VerificationCase
 	measurements map[string][]domain.Measurement
 	seals        map[string]domain.EvidenceSeal
+	labs         map[string]domain.CalibrationLab
+	scopes       map[string]domain.CapabilityScope
 	events       []domain.AuditEvent
 	counters     map[string]int
 }
@@ -203,6 +241,77 @@ func (m *Mutation) Events(caseID string) []domain.AuditEvent {
 	return result
 }
 
+func (m *Mutation) EventsForSubject(subjectType, subjectID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range m.events {
+		if item.SubjectType == subjectType && item.SubjectID == subjectID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (m *Mutation) Lab(id string) (domain.CalibrationLab, bool) {
+	item, ok := m.labs[id]
+	return item, ok
+}
+
+func (m *Mutation) LabByName(normalizedName string) (domain.CalibrationLab, bool) {
+	for _, item := range m.labs {
+		if domain.NormalizeLabName(item.Name) == normalizedName {
+			return item, true
+		}
+	}
+	return domain.CalibrationLab{}, false
+}
+
+func (m *Mutation) PutLab(item domain.CalibrationLab) error {
+	if _, exists := m.labs[item.ID]; exists {
+		return fmt.Errorf("%w: lab %s", domain.ErrStateConflict, item.ID)
+	}
+	m.labs[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdateLab(item domain.CalibrationLab) error {
+	if _, exists := m.labs[item.ID]; !exists {
+		return fmt.Errorf("%w: lab %s", domain.ErrNotFound, item.ID)
+	}
+	m.labs[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) Scope(id string) (domain.CapabilityScope, bool) {
+	item, ok := m.scopes[id]
+	return item, ok
+}
+
+func (m *Mutation) ScopesForLab(labID string) []domain.CapabilityScope {
+	var result []domain.CapabilityScope
+	for _, item := range m.scopes {
+		if item.LabID == labID {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func (m *Mutation) PutScope(item domain.CapabilityScope) error {
+	if _, exists := m.scopes[item.ID]; exists {
+		return fmt.Errorf("%w: scope %s", domain.ErrStateConflict, item.ID)
+	}
+	m.scopes[item.ID] = item
+	return nil
+}
+
+func (m *Mutation) UpdateScope(item domain.CapabilityScope) error {
+	if _, exists := m.scopes[item.ID]; !exists {
+		return fmt.Errorf("%w: scope %s", domain.ErrNotFound, item.ID)
+	}
+	m.scopes[item.ID] = item
+	return nil
+}
+
 func (r *Repository) Read(ctx context.Context, fn func(Snapshot) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -224,6 +333,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		labs:         cloneLabs(r.labs),
+		scopes:       cloneScopes(r.scopes),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 		counters:     cloneCounters(r.counters),
 	}
@@ -234,6 +345,8 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
+	r.labs = next.labs
+	r.scopes = next.scopes
 	r.events = next.events
 	r.counters = next.counters
 	return nil
@@ -245,6 +358,8 @@ func (r *Repository) snapshot() Snapshot {
 		cases:        cloneCases(r.cases),
 		measurements: cloneMeasurements(r.measurements),
 		seals:        cloneSeals(r.seals),
+		labs:         cloneLabs(r.labs),
+		scopes:       cloneScopes(r.scopes),
 		events:       append([]domain.AuditEvent(nil), r.events...),
 	}
 }
@@ -275,6 +390,22 @@ func cloneMeasurements(values map[string][]domain.Measurement) map[string][]doma
 
 func cloneSeals(values map[string]domain.EvidenceSeal) map[string]domain.EvidenceSeal {
 	result := make(map[string]domain.EvidenceSeal, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneLabs(values map[string]domain.CalibrationLab) map[string]domain.CalibrationLab {
+	result := make(map[string]domain.CalibrationLab, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneScopes(values map[string]domain.CapabilityScope) map[string]domain.CapabilityScope {
+	result := make(map[string]domain.CapabilityScope, len(values))
 	for key, value := range values {
 		result[key] = value
 	}

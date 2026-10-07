@@ -106,3 +106,82 @@ func (s *Server) events(writer http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(writer, http.StatusOK, contracts.EventsResponse{Events: view.Events})
 }
+
+func (s *Server) registerLab(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.RegisterLabRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	lab, err := s.service.RegisterLab(request.Context(), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, contracts.LabResponse{Lab: lab})
+}
+
+func (s *Server) lab(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.Lab(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) addScope(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.UpsertScopeRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.AddScope(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) updateScope(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.UpsertScopeRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.UpdateScope(request.Context(), request.PathValue("id"), request.PathValue("scopeID"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) suspendLab(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.SuspendLabRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.SuspendLab(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) reinstateLab(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.ReinstateLabRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.ReinstateLab(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}

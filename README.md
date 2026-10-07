@@ -3,7 +3,11 @@
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
 measurement assurance work. It registers devices, opens verification cases,
 records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+evidence records. Stewards can also register external calibration labs with
+their accredited capability scopes and validity windows, so measurements can
+reference the external basis that backs them; the reference is validated at
+record time and pinned as an immutable snapshot on the measurement and the
+evidence seal.
 
 ## Run
 
@@ -22,6 +26,11 @@ go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
 go run ./cmd/workflowcheck --workflow seal-verification
+go run ./cmd/workflowcheck --workflow register-calibration-lab
+go run ./cmd/workflowcheck --workflow maintain-capability-scope
+go run ./cmd/workflowcheck --workflow record-external-measurement
+go run ./cmd/workflowcheck --workflow reject-unavailable-external-basis
+go run ./cmd/workflowcheck --workflow preserve-external-basis-history
 ```
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
@@ -42,6 +51,20 @@ or extend these smoke checks with red/green verification tests.
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+- `POST /labs`
+- `GET /labs/{id}`
+- `POST /labs/{id}/scopes`
+- `PUT /labs/{id}/scopes/{scopeID}`
+- `POST /labs/{id}/suspend`
+- `POST /labs/{id}/reinstate`
+
+A measurement can carry an `external_basis` object with `lab_id` and
+`scope_id`. The service records it only while the lab is active, the scope's
+validity window covers the recording time, and the observed value is inside
+the accredited range; otherwise the request fails with
+`capability_unavailable` or `scope_mismatch` and the case is unchanged.
+Accepted references appear as immutable snapshots on the measurement, the
+evidence seal, and the audit event details.
 
 ## Layout
 

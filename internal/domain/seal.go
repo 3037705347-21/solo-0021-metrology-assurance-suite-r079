@@ -7,16 +7,17 @@ import (
 )
 
 type EvidenceSeal struct {
-	ID            string    `json:"id"`
-	CaseID        string    `json:"case_id"`
-	DeviceID      string    `json:"device_id"`
-	MeasurementID string    `json:"measurement_id"`
-	Reviewer      string    `json:"reviewer"`
-	Summary       string    `json:"summary"`
-	SealedAt      time.Time `json:"sealed_at"`
+	ID            string         `json:"id"`
+	CaseID        string         `json:"case_id"`
+	DeviceID      string         `json:"device_id"`
+	MeasurementID string         `json:"measurement_id"`
+	Reviewer      string         `json:"reviewer"`
+	Summary       string         `json:"summary"`
+	ExternalBasis *ExternalBasis `json:"external_basis,omitempty"`
+	SealedAt      time.Time      `json:"sealed_at"`
 }
 
-func NewEvidenceSeal(id, caseID, deviceID, measurementID, reviewer, summary string, at time.Time) (EvidenceSeal, error) {
+func NewEvidenceSeal(id, caseID, deviceID, measurementID, reviewer, summary string, basis *ExternalBasis, at time.Time) (EvidenceSeal, error) {
 	item := EvidenceSeal{
 		ID:            strings.TrimSpace(id),
 		CaseID:        strings.TrimSpace(caseID),
@@ -25,6 +26,10 @@ func NewEvidenceSeal(id, caseID, deviceID, measurementID, reviewer, summary stri
 		Reviewer:      strings.TrimSpace(reviewer),
 		Summary:       strings.TrimSpace(summary),
 		SealedAt:      at.UTC(),
+	}
+	if basis != nil {
+		copied := *basis
+		item.ExternalBasis = &copied
 	}
 	if err := item.Validate(); err != nil {
 		return EvidenceSeal{}, err
@@ -38,6 +43,11 @@ func (s EvidenceSeal) Validate() error {
 	}
 	if s.SealedAt.IsZero() {
 		return fmt.Errorf("%w: seal time is required", ErrInvalidInput)
+	}
+	if s.ExternalBasis != nil {
+		if err := s.ExternalBasis.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

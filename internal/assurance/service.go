@@ -77,6 +77,283 @@ func (s *Service) Device(ctx context.Context, id string) (domain.Device, error) 
 	return found, err
 }
 
+func (s *Service) RegisterLab(ctx context.Context, input contracts.RegisterLabRequest) (domain.CalibrationLab, error) {
+	var created domain.CalibrationLab
+	name := domain.NormalizeLabName(input.Name)
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		if _, exists := m.LabByName(name); exists {
+			return fmt.Errorf("%w: %s", domain.ErrDuplicateLabName, strings.TrimSpace(input.Name))
+		}
+		item, err := domain.NewCalibrationLab(
+			m.NextID("lab"),
+			input.Name,
+			input.Accreditation,
+			input.Steward,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutLab(item); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"lab",
+			item.ID,
+			"",
+			"lab_registered",
+			item.Steward,
+			fmt.Sprintf("external calibration lab registered with accreditation %s", item.Accreditation),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		created = item
+		return nil
+	})
+	return created, err
+}
+
+func (s *Service) Lab(ctx context.Context, id string) (contracts.LabResponse, error) {
+	var result contracts.LabResponse
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		item, exists := snapshot.Lab(strings.TrimSpace(id))
+		if !exists {
+			return fmt.Errorf("%w: lab %s", domain.ErrNotFound, id)
+		}
+		result = contracts.LabResponse{
+			Lab:    item,
+			Scopes: snapshot.ScopesForLab(item.ID),
+			Events: snapshot.EventsForSubject("lab", item.ID),
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) AddScope(ctx context.Context, labID string, input contracts.UpsertScopeRequest) (contracts.LabResponse, error) {
+	var result contracts.LabResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		lab, exists := m.Lab(strings.TrimSpace(labID))
+		if !exists {
+			return fmt.Errorf("%w: lab %s", domain.ErrNotFound, labID)
+		}
+		actor, err := requireActor(input.Actor)
+		if err != nil {
+			return err
+		}
+		scope, err := domain.NewCapabilityScope(
+			m.NextID("scope"),
+			lab.ID,
+			input.Parameter,
+			input.MinValue,
+			input.MaxValue,
+			input.Uncertainty,
+			input.ValidFrom,
+			input.ValidUntil,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.PutScope(scope); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"lab",
+			lab.ID,
+			"",
+			"lab_scope_added",
+			actor,
+			scopeDetail("capability scope added", scope),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = labResponse(m, lab)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) UpdateScope(ctx context.Context, labID, scopeID string, input contracts.UpsertScopeRequest) (contracts.LabResponse, error) {
+	var result contracts.LabResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		lab, exists := m.Lab(strings.TrimSpace(labID))
+		if !exists {
+			return fmt.Errorf("%w: lab %s", domain.ErrNotFound, labID)
+		}
+		scope, exists := m.Scope(strings.TrimSpace(scopeID))
+		if !exists || scope.LabID != lab.ID {
+			return fmt.Errorf("%w: scope %s", domain.ErrNotFound, scopeID)
+		}
+		actor, err := requireActor(input.Actor)
+		if err != nil {
+			return err
+		}
+		updated, err := domain.NewCapabilityScope(
+			scope.ID,
+			lab.ID,
+			input.Parameter,
+			input.MinValue,
+			input.MaxValue,
+			input.Uncertainty,
+			input.ValidFrom,
+			input.ValidUntil,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := m.UpdateScope(updated); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"lab",
+			lab.ID,
+			"",
+			"lab_scope_updated",
+			actor,
+			scopeDetail("capability scope updated; previously recorded measurements and seals keep their original snapshot", updated),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = labResponse(m, lab)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) SuspendLab(ctx context.Context, labID string, input contracts.SuspendLabRequest) (contracts.LabResponse, error) {
+	var result contracts.LabResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		lab, exists := m.Lab(strings.TrimSpace(labID))
+		if !exists {
+			return fmt.Errorf("%w: lab %s", domain.ErrNotFound, labID)
+		}
+		actor, err := requireActor(input.Actor)
+		if err != nil {
+			return err
+		}
+		reason := strings.TrimSpace(input.Reason)
+		if reason == "" {
+			return fmt.Errorf("%w: reason is required", domain.ErrInvalidInput)
+		}
+		if err := lab.Suspend(s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateLab(lab); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"lab",
+			lab.ID,
+			"",
+			"lab_suspended",
+			actor,
+			fmt.Sprintf("lab suspended; new measurements cannot reference its scopes: %s", reason),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = labResponse(m, lab)
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) ReinstateLab(ctx context.Context, labID string, input contracts.ReinstateLabRequest) (contracts.LabResponse, error) {
+	var result contracts.LabResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		lab, exists := m.Lab(strings.TrimSpace(labID))
+		if !exists {
+			return fmt.Errorf("%w: lab %s", domain.ErrNotFound, labID)
+		}
+		actor, err := requireActor(input.Actor)
+		if err != nil {
+			return err
+		}
+		if err := lab.Reinstate(s.now()); err != nil {
+			return err
+		}
+		if err := m.UpdateLab(lab); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"lab",
+			lab.ID,
+			"",
+			"lab_reinstated",
+			actor,
+			"lab reinstated; its valid scopes can back new measurements again",
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = labResponse(m, lab)
+		return nil
+	})
+	return result, err
+}
+
+func requireActor(actor string) (string, error) {
+	trimmed := strings.TrimSpace(actor)
+	if trimmed == "" {
+		return "", fmt.Errorf("%w: actor is required", domain.ErrInvalidInput)
+	}
+	return trimmed, nil
+}
+
+func scopeDetail(prefix string, scope domain.CapabilityScope) string {
+	return fmt.Sprintf("%s: %s parameter %s range [%g, %g] uncertainty %g valid %s to %s",
+		prefix,
+		scope.ID,
+		scope.Parameter,
+		scope.MinValue,
+		scope.MaxValue,
+		scope.Uncertainty,
+		scope.ValidFrom.Format("2006-01-02"),
+		scope.ValidUntil.Format("2006-01-02"),
+	)
+}
+
+func basisNote(basis domain.ExternalBasis) string {
+	return fmt.Sprintf("external basis %s (%s, accreditation %s) scope %s parameter %s range [%g, %g] valid until %s",
+		basis.LabName,
+		basis.LabID,
+		basis.Accreditation,
+		basis.ScopeID,
+		basis.Parameter,
+		basis.MinValue,
+		basis.MaxValue,
+		basis.ValidUntil.Format("2006-01-02"),
+	)
+}
+
+func labResponse(m *repository.Mutation, lab domain.CalibrationLab) contracts.LabResponse {
+	return contracts.LabResponse{
+		Lab:    lab,
+		Scopes: m.ScopesForLab(lab.ID),
+		Events: m.EventsForSubject("lab", lab.ID),
+	}
+}
+
 func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest) (contracts.CaseResponse, error) {
 	var result contracts.CaseResponse
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
@@ -158,6 +435,15 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if err != nil {
 			return err
 		}
+		if input.ExternalBasis != nil {
+			basis, err := resolveExternalBasis(m, *input.ExternalBasis, measurement.Observed, s.now())
+			if err != nil {
+				return err
+			}
+			if err := measurement.AttachExternalBasis(basis); err != nil {
+				return err
+			}
+		}
 		if err := item.RecordMeasurement(measurement.Accepted, s.now()); err != nil {
 			return err
 		}
@@ -172,6 +458,9 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if measurement.Accepted {
 			kind = "measurement_accepted"
 			detail = "measurement is within tolerance and ready for review"
+		}
+		if measurement.ExternalBasis != nil {
+			detail += "; references " + basisNote(*measurement.ExternalBasis)
 		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
@@ -191,6 +480,50 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		return nil
 	})
 	return result, err
+}
+
+// resolveExternalBasis proves the referenced lab capability was usable at the
+// moment of recording and snapshots it, so later lab maintenance cannot
+// rewrite the basis a measurement relied on.
+func resolveExternalBasis(m *repository.Mutation, ref contracts.ExternalReferenceRequest, observed float64, at time.Time) (domain.ExternalBasis, error) {
+	labID := strings.TrimSpace(ref.LabID)
+	scopeID := strings.TrimSpace(ref.ScopeID)
+	if labID == "" || scopeID == "" {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: external basis lab id and scope id are required", domain.ErrInvalidInput)
+	}
+	lab, exists := m.Lab(labID)
+	if !exists {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: lab %s", domain.ErrNotFound, labID)
+	}
+	if !lab.IsActive() {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: lab %s is %s", domain.ErrCapabilityUnavailable, lab.ID, lab.Status)
+	}
+	scope, exists := m.Scope(scopeID)
+	if !exists {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: scope %s", domain.ErrNotFound, scopeID)
+	}
+	if scope.LabID != lab.ID {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: scope %s does not belong to lab %s", domain.ErrInvalidInput, scope.ID, lab.ID)
+	}
+	if !scope.ValidAt(at) {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: scope %s validity %s to %s does not cover %s",
+			domain.ErrCapabilityUnavailable,
+			scope.ID,
+			scope.ValidFrom.Format("2006-01-02"),
+			scope.ValidUntil.Format("2006-01-02"),
+			at.UTC().Format("2006-01-02"),
+		)
+	}
+	if !scope.Covers(observed) {
+		return domain.ExternalBasis{}, fmt.Errorf("%w: observed value %g is outside scope %s range [%g, %g]",
+			domain.ErrScopeMismatch,
+			observed,
+			scope.ID,
+			scope.MinValue,
+			scope.MaxValue,
+		)
+	}
+	return domain.NewExternalBasis(lab, scope, at)
 }
 
 func (s *Service) ReopenCase(ctx context.Context, caseID string, input contracts.ReopenCaseRequest) (contracts.CaseResponse, error) {
@@ -257,6 +590,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			measurement.ID,
 			input.Reviewer,
 			input.Summary,
+			measurement.ExternalBasis,
 			s.now(),
 		)
 		if err != nil {
@@ -268,6 +602,10 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 		if err := m.UpdateCase(item); err != nil {
 			return err
 		}
+		detail := seal.Summary
+		if seal.ExternalBasis != nil {
+			detail += "; sealed with " + basisNote(*seal.ExternalBasis)
+		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
 			"case",
@@ -275,7 +613,7 @@ func (s *Service) SealCase(ctx context.Context, caseID string, input contracts.S
 			item.ID,
 			"case_sealed",
 			seal.Reviewer,
-			seal.Summary,
+			detail,
 			s.now(),
 		)
 		if err != nil {
